@@ -119,12 +119,12 @@ class VolcEngineVLM(OpenAIVLM):
                 raise ImportError(
                     "Please install volcenginesdkarkruntime: pip install volcenginesdkarkruntime"
                 )
-            kwargs = {
-                "api_key": self.api_key,
-                "base_url": self.api_base,
-                "timeout": self.timeout,
-                "max_retries": 0,
-            }
+            kwargs = dict(
+                api_key=self.api_key,
+                base_url=self.api_base,
+                timeout=self.timeout,
+                max_retries=0,
+            )
             http_client = create_optional_sync_httpx_client(
                 self.api_base,
                 timeout=self.timeout,
@@ -142,12 +142,12 @@ class VolcEngineVLM(OpenAIVLM):
             raise ImportError(
                 "Please install volcenginesdkarkruntime: pip install volcenginesdkarkruntime"
             )
-        kwargs = {
-            "api_key": self.api_key,
-            "base_url": self.api_base,
-            "timeout": self.timeout,
-            "max_retries": 0,
-        }
+        kwargs = dict(
+            api_key=self.api_key,
+            base_url=self.api_base,
+            timeout=self.timeout,
+            max_retries=0,
+        )
         http_client = create_optional_async_httpx_client(
             self.api_base,
             timeout=self.timeout,

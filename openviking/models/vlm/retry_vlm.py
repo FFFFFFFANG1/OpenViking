@@ -25,18 +25,6 @@ class RetryVLM(VLMBase):
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        inner = self.__dict__.get("inner")
-        if (
-            inner is not None
-            and name not in self.__dict__
-            and not hasattr(type(self), name)
-            and hasattr(inner, name)
-        ):
-            setattr(inner, name, value)
-            return
-        object.__setattr__(self, name, value)
-
     @property
     def token_tracker(self):
         return self.inner.token_tracker

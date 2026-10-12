@@ -77,11 +77,6 @@ class _ProviderError(RuntimeError):
         self.body = body
 
 
-class _Response:
-    def __init__(self, status_code):
-        self.status_code = status_code
-
-
 def test_extract_metric_error_code_prefers_structured_provider_code():
     assert (
         extract_metric_error_code(_ProviderError(status_code=429, code="RateLimitExceeded"))
@@ -99,34 +94,6 @@ def test_extract_metric_error_code_uses_safe_fallbacks_only():
     wrapped_timeout.__cause__ = TimeoutError("request timed out")
     assert extract_metric_error_code(wrapped_timeout) == "timeout"
     assert extract_metric_error_code(RuntimeError("request_id=not-a-metric-label")) == "unknown"
-
-
-@pytest.mark.parametrize(
-    ("status_code", "expected"),
-    [
-        (400, ERROR_CLASS_PERMANENT),
-        (401, ERROR_CLASS_AUTH),
-        (403, ERROR_CLASS_AUTH),
-        (413, ERROR_CLASS_INPUT_TOO_LARGE),
-        (429, ERROR_CLASS_TRANSIENT),
-        (503, ERROR_CLASS_TRANSIENT),
-    ],
-)
-def test_classify_api_error_prefers_structured_response_status(status_code, expected):
-    error = RuntimeError("provider request failed without status text")
-    error.response = _Response(status_code)
-
-    assert classify_api_error(error) == expected
-
-
-def test_structured_quota_code_takes_precedence_over_429_status():
-    error = _ProviderError(status_code=429, code="AccountQuotaExceeded")
-
-    assert classify_api_error(error) == ERROR_CLASS_QUOTA_EXCEEDED
-
-
-def test_unstructured_number_is_not_treated_as_http_status():
-    assert classify_api_error(RuntimeError("request id abc503xyz")) == ERROR_CLASS_UNKNOWN
 
 
 def test_classify_all_credentials_failed_prefers_transient_over_auth():

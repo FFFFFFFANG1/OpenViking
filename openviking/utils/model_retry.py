@@ -204,53 +204,6 @@ def _pattern_matches(text_lower: str, text_compact: str, pattern: str) -> bool:
     return pattern in text_lower or pattern in text_compact
 
 
-def _extract_structured_error_details(error: BaseException) -> tuple[list[int], list[str]]:
-    """Extract trusted status and provider code fields from an exception chain."""
-    statuses: list[int] = []
-    codes: list[str] = []
-    seen: set[int] = set()
-    current: BaseException | None = error
-
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        candidates = [current, getattr(current, "response", None)]
-        for candidate in candidates:
-            if candidate is None:
-                continue
-            status = getattr(candidate, "status_code", None)
-            try:
-                status_int = int(status)
-            except (TypeError, ValueError):
-                status_int = None
-            if status_int is not None and 100 <= status_int <= 599:
-                statuses.append(status_int)
-
-        for attr in ("error_code", "code", "type"):
-            value = getattr(current, attr, None)
-            if isinstance(value, str) and value:
-                codes.append(value)
-            elif attr == "code" and isinstance(value, int) and 100 <= value <= 599:
-                statuses.append(value)
-
-        body = getattr(current, "body", None)
-        if isinstance(body, dict):
-            body_candidates = [body]
-            nested = body.get("error")
-            if isinstance(nested, dict):
-                body_candidates.append(nested)
-            for item in body_candidates:
-                for key in ("error_code", "code", "type"):
-                    value = item.get(key)
-                    if isinstance(value, str) and value:
-                        codes.append(value)
-                    elif key == "code" and isinstance(value, int) and 100 <= value <= 599:
-                        statuses.append(value)
-
-        current = current.__cause__ or current.__context__
-
-    return statuses, codes
-
-
 def classify_api_error(error: Exception) -> str:
     """Classify an API error into one of the ERROR_CLASS_* categories.
 
@@ -281,8 +234,7 @@ def classify_api_error(error: Exception) -> str:
         if exc is not None and isinstance(exc, _PERMANENT_IO_ERRORS):
             return ERROR_CLASS_PERMANENT
 
-    structured_statuses, structured_codes = _extract_structured_error_details(error)
-    texts = [str(error), *structured_codes]
+    texts = [str(error)]
     if error.__cause__ is not None:
         texts.append(str(error.__cause__))
 
@@ -301,15 +253,6 @@ def classify_api_error(error: Exception) -> str:
         for pattern in CONTENT_SAFETY_PATTERNS:
             if _pattern_matches(text_lower, text_compact, pattern):
                 return ERROR_CLASS_CONTENT_SAFETY
-
-    if 413 in structured_statuses:
-        return ERROR_CLASS_INPUT_TOO_LARGE
-
-    if 400 in structured_statuses:
-        return ERROR_CLASS_PERMANENT
-
-    if any(status in (401, 403) for status in structured_statuses):
-        return ERROR_CLASS_AUTH
 
     for text in texts:
         text_lower = text.lower()
@@ -332,11 +275,6 @@ def classify_api_error(error: Exception) -> str:
         for pattern in QUOTA_EXCEEDED_PATTERNS:
             if pattern in text_lower:
                 return ERROR_CLASS_QUOTA_EXCEEDED
-
-    if 429 in structured_statuses or any(
-        status in (500, 502, 503, 504) for status in structured_statuses
-    ):
-        return ERROR_CLASS_TRANSIENT
 
     for text in texts:
         text_lower = text.lower()

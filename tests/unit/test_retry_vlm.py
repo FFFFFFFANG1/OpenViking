@@ -13,7 +13,12 @@ from openviking_cli.utils.config.vlm_config import VLMConfig
 
 class ProviderError(RuntimeError):
     def __init__(self, status_code: int):
-        super().__init__("provider request failed")
+        messages = {
+            400: "400 invalid parameter",
+            401: "401 unauthorized",
+            503: "503 service unavailable",
+        }
+        super().__init__(messages[status_code])
         self.status_code = status_code
 
 
@@ -190,13 +195,11 @@ def test_retry_vlm_delegates_token_tracker_and_close():
     assert inner.closed is True
 
 
-def test_vlm_factory_exposes_raw_and_standard_creation():
+def test_vlm_factory_wraps_provider_with_standard_retry():
     config = {"provider": "kimi", "api_key": "key", "model": "kimi-code"}
 
-    raw = VLMFactory.create_provider(config)
     standard = VLMFactory.create(config)
 
-    assert raw.__class__.__name__ == "KimiVLM"
     assert isinstance(standard, RetryVLM)
     assert standard.inner.__class__.__name__ == "KimiVLM"
 
