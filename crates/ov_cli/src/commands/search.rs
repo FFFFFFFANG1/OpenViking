@@ -203,7 +203,12 @@ pub async fn search(
         .await?;
     if mode == "context" {
         if let Some(rendered) = render_context_output_for_table(&result, output_format) {
-            println!("{rendered}");
+            for error in rendered.retrieval_errors {
+                eprintln!("Warning: context retrieval failed: {error}");
+            }
+            if !rendered.text.is_empty() {
+                println!("{}", rendered.text);
+            }
         } else {
             output_success(&result, output_format, compact);
         }
@@ -218,7 +223,15 @@ pub async fn search(
     Ok(())
 }
 
-fn render_context_output_for_table(value: &Value, output_format: OutputFormat) -> Option<String> {
+struct ContextTextOutput {
+    text: String,
+    retrieval_errors: Vec<String>,
+}
+
+fn render_context_output_for_table(
+    value: &Value,
+    output_format: OutputFormat,
+) -> Option<ContextTextOutput> {
     if matches!(output_format, OutputFormat::Json) {
         return None;
     }
@@ -232,6 +245,17 @@ fn render_context_output_for_table(value: &Value, output_format: OutputFormat) -
         .get("profile")
         .filter(|profile| !profile.is_null())
         .or_else(|| object.get("profile").filter(|profile| !profile.is_null()));
+
+    let retrieval_errors: Vec<String> = result
+        .get("stats")
+        .and_then(|stats| stats.get("retrieval_errors"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|error| !error.trim().is_empty())
+        .map(str::to_string)
+        .collect();
 
     let no_relevant = result
         .get("stats")
@@ -249,13 +273,17 @@ fn render_context_output_for_table(value: &Value, output_format: OutputFormat) -
         })
     };
 
-    let mut lines = vec![match text {
-        Some(text) => text.to_string(),
-        None if no_relevant => theme::muted("No relevant context found.").to_string(),
-        None => theme::muted("No context found.").to_string(),
-    }];
+    let mut lines = match text {
+        Some(text) => vec![text.to_string()],
+        None if !retrieval_errors.is_empty() => Vec::new(),
+        None if no_relevant => vec![theme::muted("No relevant context found.").to_string()],
+        None => vec![theme::muted("No context found.").to_string()],
+    };
     append_profile_lines(profile, &mut lines);
-    Some(lines.join("\n"))
+    Some(ContextTextOutput {
+        text: lines.join("\n"),
+        retrieval_errors,
+    })
 }
 
 fn output_search_results(
@@ -996,7 +1024,9 @@ mod tests {
         });
 
         assert_eq!(
-            render_context_output_for_table(&result, OutputFormat::Table).as_deref(),
+            render_context_output_for_table(&result, OutputFormat::Table)
+                .map(|output| output.text)
+                .as_deref(),
             Some(text.as_str())
         );
     }
@@ -1011,7 +1041,9 @@ mod tests {
         });
 
         assert_eq!(
-            render_context_output_for_table(&result, OutputFormat::Table).as_deref(),
+            render_context_output_for_table(&result, OutputFormat::Table)
+                .map(|output| output.text)
+                .as_deref(),
             Some("  Concise context.\n")
         );
     }
@@ -1026,7 +1058,9 @@ mod tests {
         });
 
         assert_eq!(
-            render_context_output_for_table(&result, OutputFormat::Table).as_deref(),
+            render_context_output_for_table(&result, OutputFormat::Table)
+                .map(|output| output.text)
+                .as_deref(),
             Some("Full assembled context.")
         );
     }
@@ -1043,7 +1077,7 @@ mod tests {
         let rendered = render_context_output_for_table(&result, OutputFormat::Table)
             .expect("empty context message");
 
-        assert_eq!(strip_ansi(&rendered), "No context found.");
+        assert_eq!(strip_ansi(&rendered.text), "No context found.");
     }
 
     #[test]
@@ -1058,8 +1092,8 @@ mod tests {
         let rendered = render_context_output_for_table(&result, OutputFormat::Table)
             .expect("no relevant context message");
 
-        assert_eq!(strip_ansi(&rendered), "No relevant context found.");
-        assert!(!rendered.contains("Rejected"));
+        assert_eq!(strip_ansi(&rendered.text), "No relevant context found.");
+        assert!(!rendered.text.contains("Rejected"));
     }
 
     #[test]
@@ -1078,7 +1112,7 @@ mod tests {
             .expect("context with profile");
 
         assert_eq!(
-            strip_ansi(&rendered),
+            strip_ansi(&rendered.text),
             "Full assembled context.\nSecond line.\n\nprofile\ncontext assembly: 12ms"
         );
     }
@@ -1099,9 +1133,73 @@ mod tests {
             .expect("empty context with profile");
 
         assert_eq!(
-            strip_ansi(&rendered),
+            strip_ansi(&rendered.text),
             "No context found.\n\nprofile\ncontext assembly: 12ms"
         );
+    }
+
+    #[test]
+    fn context_output_keeps_retrieval_errors_separate_from_usable_text() {
+        for (digest, expected) in [("", "Full context."), ("Digest.", "Digest.")] {
+            let result = json!({
+                "result": {
+                    "rendered": "Full context.",
+                    "digest": digest,
+                    "stats": {
+                        "retrieval_errors": ["RuntimeError: index unavailable", "TimeoutError: embedder"]
+                    }
+                },
+                "profile": ["context assembly: 12ms"]
+            });
+
+            let rendered = render_context_output_for_table(&result, OutputFormat::Table)
+                .expect("context with retrieval failures");
+
+            assert_eq!(
+                strip_ansi(&rendered.text),
+                format!("{expected}\n\nprofile\ncontext assembly: 12ms")
+            );
+            assert_eq!(
+                rendered.retrieval_errors,
+                ["RuntimeError: index unavailable", "TimeoutError: embedder"]
+            );
+        }
+    }
+
+    #[test]
+    fn context_output_does_not_report_retrieval_failures_as_no_matches() {
+        for (rewrite, text) in [("off", ""), ("no_relevant", "Rejected context.")] {
+            let result = json!({
+                "rendered": text,
+                "digest": "",
+                "stats": {
+                    "rewrite": rewrite,
+                    "retrieval_errors": ["RuntimeError: index unavailable"]
+                }
+            });
+
+            let rendered = render_context_output_for_table(&result, OutputFormat::Table)
+                .expect("retrieval failure output");
+
+            assert!(rendered.text.is_empty());
+            assert_eq!(rendered.retrieval_errors, ["RuntimeError: index unavailable"]);
+        }
+    }
+
+    #[test]
+    fn context_output_ignores_empty_retrieval_errors() {
+        for errors in [json!(null), json!([]), json!(["", " \n"])] {
+            let result = json!({
+                "rendered": "",
+                "stats": {"retrieval_errors": errors}
+            });
+
+            let rendered = render_context_output_for_table(&result, OutputFormat::Table)
+                .expect("empty context output");
+
+            assert_eq!(strip_ansi(&rendered.text), "No context found.");
+            assert!(rendered.retrieval_errors.is_empty());
+        }
     }
 
     #[test]
@@ -1111,7 +1209,11 @@ mod tests {
                 "entries": [{"uri": "viking://resources/auth.md", "text": "Full entry."}],
                 "rendered": "Full assembled context.",
                 "digest": "Concise context.",
-                "stats": {"returned": 1, "rewrite": "ok"}
+                "stats": {
+                    "returned": 1,
+                    "rewrite": "ok",
+                    "retrieval_errors": ["RuntimeError: index unavailable"]
+                }
             },
             "profile": ["context assembly: 12ms"]
         });
