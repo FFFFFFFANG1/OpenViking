@@ -16,10 +16,12 @@ from .base import (
     VLMFactory,
 )
 from .registry import get_all_provider_names, is_valid_provider
+from .retry_vlm import RetryVLM
 
 __all__ = [
     "VLMBase",
     "VLMFactory",
+    "RetryVLM",
     "FailoverVLM",
     "MultiCredentialVLM",
     "AllCredentialsFailedError",

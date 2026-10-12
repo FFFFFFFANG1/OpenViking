@@ -354,7 +354,7 @@ class TestOpenAIVLMClientRetries:
             (400, "Total tokens of multi-modal content and text exceed max message tokens.", 1),
             (400, "The parameter model is invalid.", 1),
             (401, "Unauthorized", 1),
-            (503, "Service Unavailable", 6),
+            (503, "Service Unavailable", 1),
         ],
     )
     @patch("volcenginesdkarkruntime.AsyncArk")
