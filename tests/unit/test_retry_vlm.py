@@ -1,12 +1,14 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from openviking.models.vlm.base import VLMBase, VLMFactory
+from openviking.models.vlm.base import MultiCredentialVLM, VLMBase, VLMFactory
 from openviking.models.vlm.retry_vlm import RetryVLM
+from openviking_cli.utils.config.vlm_config import VLMConfig
 
 
 class ProviderError(RuntimeError):
@@ -124,6 +126,38 @@ def test_retry_vlm_honors_zero_retries():
     assert len(inner.calls) == 1
 
 
+def test_retry_vlm_uses_max_retries_as_additional_attempts():
+    errors = [ProviderError(503) for _ in range(3)]
+    inner = FakeVLM(errors)
+
+    with pytest.raises(ProviderError) as raised:
+        RetryVLM(inner).get_completion(prompt="hello")
+
+    assert raised.value is errors[-1]
+    assert len(inner.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_vlm_does_not_retry_cancelled_request():
+    started = asyncio.Event()
+
+    class BlockingVLM(FakeVLM):
+        async def get_completion_async(self, **kwargs):
+            self.calls.append(("async_text", kwargs))
+            started.set()
+            await asyncio.Event().wait()
+
+    inner = BlockingVLM([])
+    task = asyncio.create_task(RetryVLM(inner).get_completion_async(prompt="hello"))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(inner.calls) == 1
+
+
 @pytest.mark.asyncio
 async def test_retry_vlm_forwards_extension_kwargs_and_does_not_retry_media(tmp_path):
     media_error = ProviderError(503)
@@ -165,3 +199,31 @@ def test_vlm_factory_exposes_raw_and_standard_creation():
     assert raw.__class__.__name__ == "KimiVLM"
     assert isinstance(standard, RetryVLM)
     assert standard.inner.__class__.__name__ == "KimiVLM"
+
+
+def test_vlm_config_wraps_each_credential_inside_failover():
+    config = VLMConfig(
+        model="kimi-code",
+        credentials=[
+            {
+                "id": "primary",
+                "provider": "kimi",
+                "api_key": "primary-key",
+            },
+            {
+                "id": "backup",
+                "provider": "glm",
+                "api_key": "backup-key",
+                "model": "glm-4.6v",
+            },
+        ],
+    )
+
+    instance = config.get_vlm_instance()
+
+    assert isinstance(instance, MultiCredentialVLM)
+    assert all(isinstance(child, RetryVLM) for child in instance._vlm_instances)
+    assert [child.inner.__class__.__name__ for child in instance._vlm_instances] == [
+        "KimiVLM",
+        "GLMVLM",
+    ]
