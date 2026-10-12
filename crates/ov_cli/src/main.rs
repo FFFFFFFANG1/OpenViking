@@ -986,7 +986,16 @@ enum Commands {
             help_heading = "Common options"
         )]
         search_type: String,
-        /// Target URI
+        /// Return ranked hits (list) or assembled context (context)
+        #[arg(
+            long,
+            default_value = "list",
+            value_parser = ["list", "context"],
+            value_name = "list|context",
+            help_heading = "Common options"
+        )]
+        mode: String,
+        /// Target URI (list mode only)
         #[arg(
             short,
             long,
@@ -1022,7 +1031,7 @@ enum Commands {
             help_heading = "Advanced options"
         )]
         before: Option<String>,
-        /// Only include results with specific level(s) (0=abstract, 1=overview, 2=file)
+        /// Filter levels (0=abstract, 1=overview, 2=file); ignored in context mode
         #[arg(
             short = 'L',
             long = "level",
@@ -1042,7 +1051,7 @@ enum Commands {
         /// Only include results matching all of these explicit tags
         #[arg(long = "tags", value_delimiter = ',')]
         tags: Option<Vec<String>>,
-        /// Include the full visible content for every matched URI
+        /// Include the full visible content for every matched URI (list mode only)
         #[arg(long, help_heading = "Advanced options")]
         read_content: bool,
         /// Enable event decay with protection duration: 0 (immediate) or Xm/Xh/Xd
@@ -3936,6 +3945,7 @@ async fn main() {
             query,
             image,
             search_type,
+            mode,
             uri,
             session_id,
             node_limit,
@@ -3953,6 +3963,7 @@ async fn main() {
                 uri,
                 image,
                 search_type,
+                mode,
                 session_id,
                 node_limit,
                 threshold,
@@ -4203,6 +4214,71 @@ mod tests {
                 assert_eq!(context_type, Some(vec!["skill".to_string()]));
             }
             _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn cli_search_defaults_to_list_mode() {
+        let cli = Cli::try_parse_from(["ov", "search", "invoice"])
+            .expect("search should default to list mode");
+
+        match cli.command {
+            Commands::Search { mode, .. } => assert_eq!(mode, "list"),
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_search_context_mode_with_retrieval_options() {
+        let cli = Cli::try_parse_from([
+            "ov",
+            "search",
+            "recent decisions",
+            "--mode",
+            "context",
+            "--context-type",
+            "memory",
+            "--events-time-decay-protection",
+            "1d",
+            "--level",
+            "2",
+        ])
+        .expect("context mode should accept retrieval options");
+
+        match cli.command {
+            Commands::Search {
+                mode,
+                context_type,
+                events_time_decay_protection,
+                level,
+                ..
+            } => {
+                assert_eq!(mode, "context");
+                assert_eq!(context_type, Some(vec!["memory".to_string()]));
+                assert_eq!(events_time_decay_protection.as_deref(), Some("1d"));
+                assert_eq!(level, Some(vec![2]));
+            }
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_invalid_search_mode() {
+        let error = Cli::try_parse_from(["ov", "search", "invoice", "--mode", "summary"])
+            .err()
+            .expect("unknown search modes should be rejected");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn cli_find_rejects_mode() {
+        for mode in ["list", "context"] {
+            let error = Cli::try_parse_from(["ov", "find", "invoice", "--mode", mode])
+                .err()
+                .expect("find does not support a mode flag");
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
     }
 

@@ -166,6 +166,7 @@ pub async fn search(
     uri: &str,
     image: Option<String>,
     search_type: &str,
+    mode: &str,
     session_id: Option<String>,
     node_limit: i32,
     threshold: Option<f64>,
@@ -186,6 +187,7 @@ pub async fn search(
             uri.to_string(),
             image,
             search_type.to_string(),
+            mode.to_string(),
             session_id,
             node_limit,
             threshold,
@@ -199,13 +201,61 @@ pub async fn search(
             events_time_decay_protection,
         )
         .await?;
-    output_search_results(
-        &result,
-        output_format,
-        compact,
-        SearchRenderContext::search(node_limit),
-    );
+    if mode == "context" {
+        if let Some(rendered) = render_context_output_for_table(&result, output_format) {
+            println!("{rendered}");
+        } else {
+            output_success(&result, output_format, compact);
+        }
+    } else {
+        output_search_results(
+            &result,
+            output_format,
+            compact,
+            SearchRenderContext::search(node_limit),
+        );
+    }
     Ok(())
+}
+
+fn render_context_output_for_table(value: &Value, output_format: OutputFormat) -> Option<String> {
+    if matches!(output_format, OutputFormat::Json) {
+        return None;
+    }
+
+    let object = value.as_object()?;
+    let result = object
+        .get("result")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    let profile = result
+        .get("profile")
+        .filter(|profile| !profile.is_null())
+        .or_else(|| object.get("profile").filter(|profile| !profile.is_null()));
+
+    let no_relevant = result
+        .get("stats")
+        .and_then(|stats| stats.get("rewrite"))
+        .and_then(Value::as_str)
+        == Some("no_relevant");
+    let text = if no_relevant {
+        None
+    } else {
+        ["digest", "rendered"].into_iter().find_map(|key| {
+            result
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+        })
+    };
+
+    let mut lines = vec![match text {
+        Some(text) => text.to_string(),
+        None if no_relevant => theme::muted("No relevant context found.").to_string(),
+        None => theme::muted("No context found.").to_string(),
+    }];
+    append_profile_lines(profile, &mut lines);
+    Some(lines.join("\n"))
 }
 
 fn output_search_results(
@@ -931,6 +981,143 @@ pub async fn glob(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn context_output_preserves_rendered_text_without_truncation() {
+        let text = format!(
+            "<memory uri=\"viking://resources/auth.md\">\n  {}\n\nFinal line.\n</memory>\n",
+            "Long context with original spacing. ".repeat(20)
+        );
+        let result = json!({
+            "entries": [{"uri": "viking://resources/auth.md", "text": "entry text"}],
+            "rendered": text,
+            "digest": "",
+            "stats": {"returned": 1, "rewrite": "off"}
+        });
+
+        assert_eq!(
+            render_context_output_for_table(&result, OutputFormat::Table).as_deref(),
+            Some(text.as_str())
+        );
+    }
+
+    #[test]
+    fn context_output_prefers_nonempty_digest() {
+        let result = json!({
+            "entries": [],
+            "rendered": "Full assembled context.",
+            "digest": "  Concise context.\n",
+            "stats": {"rewrite": "ok"}
+        });
+
+        assert_eq!(
+            render_context_output_for_table(&result, OutputFormat::Table).as_deref(),
+            Some("  Concise context.\n")
+        );
+    }
+
+    #[test]
+    fn context_output_falls_back_from_empty_digest_to_rendered() {
+        let result = json!({
+            "entries": [],
+            "rendered": "Full assembled context.",
+            "digest": " \n",
+            "stats": {"rewrite": "failed"}
+        });
+
+        assert_eq!(
+            render_context_output_for_table(&result, OutputFormat::Table).as_deref(),
+            Some("Full assembled context.")
+        );
+    }
+
+    #[test]
+    fn context_output_explains_empty_context() {
+        let result = json!({
+            "entries": [],
+            "rendered": "",
+            "digest": "",
+            "stats": {"returned": 0, "rewrite": "off"}
+        });
+
+        let rendered = render_context_output_for_table(&result, OutputFormat::Table)
+            .expect("empty context message");
+
+        assert_eq!(strip_ansi(&rendered), "No context found.");
+    }
+
+    #[test]
+    fn context_output_does_not_restore_context_rejected_by_rewrite() {
+        let result = json!({
+            "entries": [{"text": "Rejected entry."}],
+            "rendered": "Rejected assembled context.",
+            "digest": "",
+            "stats": {"returned": 0, "rewrite": "no_relevant"}
+        });
+
+        let rendered = render_context_output_for_table(&result, OutputFormat::Table)
+            .expect("no relevant context message");
+
+        assert_eq!(strip_ansi(&rendered), "No relevant context found.");
+        assert!(!rendered.contains("Rejected"));
+    }
+
+    #[test]
+    fn context_output_unwraps_result_and_keeps_profile() {
+        let result = json!({
+            "result": {
+                "entries": [],
+                "rendered": "Full assembled context.\nSecond line.",
+                "digest": "",
+                "stats": {"rewrite": "off"}
+            },
+            "profile": ["context assembly: 12ms"]
+        });
+
+        let rendered = render_context_output_for_table(&result, OutputFormat::Table)
+            .expect("context with profile");
+
+        assert_eq!(
+            strip_ansi(&rendered),
+            "Full assembled context.\nSecond line.\n\nprofile\ncontext assembly: 12ms"
+        );
+    }
+
+    #[test]
+    fn context_output_keeps_profile_for_empty_context() {
+        let result = json!({
+            "result": {
+                "entries": [],
+                "rendered": "",
+                "digest": "",
+                "stats": {"returned": 0, "rewrite": "off"}
+            },
+            "profile": ["context assembly: 12ms"]
+        });
+
+        let rendered = render_context_output_for_table(&result, OutputFormat::Table)
+            .expect("empty context with profile");
+
+        assert_eq!(
+            strip_ansi(&rendered),
+            "No context found.\n\nprofile\ncontext assembly: 12ms"
+        );
+    }
+
+    #[test]
+    fn context_renderer_leaves_json_to_standard_output() {
+        let result = json!({
+            "result": {
+                "entries": [{"uri": "viking://resources/auth.md", "text": "Full entry."}],
+                "rendered": "Full assembled context.",
+                "digest": "Concise context.",
+                "stats": {"returned": 1, "rewrite": "ok"}
+            },
+            "profile": ["context assembly: 12ms"]
+        });
+
+        assert!(render_context_output_for_table(&result, OutputFormat::Json).is_none());
+    }
 
     #[test]
     fn search_result_cards_render_ranked_scannable_rows() {

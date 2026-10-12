@@ -1562,6 +1562,7 @@ pub async fn handle_search(
     uri: String,
     image: Option<String>,
     search_type: String,
+    mode: String,
     session_id: Option<String>,
     node_limit: i32,
     threshold: Option<f64>,
@@ -1585,9 +1586,13 @@ pub async fn handle_search(
             "--image is not supported with --search-type keywords.".to_string(),
         ));
     }
+    validate_search_mode_options(&mode, &uri, read_content)?;
     let mut params = vec![format!("--uri={}", uri), format!("-n {}", node_limit)];
     if search_type != "semantic" {
         params.push(format!("--search-type {}", search_type));
+    }
+    if mode != "list" {
+        params.push(format!("--mode {}", mode));
     }
     if let Some(ref img) = image {
         params.push(format!("--image {}", img));
@@ -1629,6 +1634,7 @@ pub async fn handle_search(
         &uri,
         image,
         &search_type,
+        &mode,
         session_id,
         node_limit,
         threshold,
@@ -1644,6 +1650,24 @@ pub async fn handle_search(
         ctx.compact,
     )
     .await
+}
+
+fn validate_search_mode_options(mode: &str, uri: &str, read_content: bool) -> Result<()> {
+    if mode == "context" {
+        if !uri.is_empty() {
+            return Err(Error::Client(
+                "--uri is not supported with --mode context. Remove --uri or use --mode list."
+                    .to_string(),
+            ));
+        }
+        if read_content {
+            return Err(Error::Client(
+                "--read-content is not supported with --mode context; context assembly already includes content. Remove --read-content or use --mode list."
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn append_time_filter_params(
@@ -2208,6 +2232,41 @@ mod config_switch_prompt_tests {
             }
         }
         output
+    }
+}
+
+#[cfg(test)]
+mod search_mode_validation_tests {
+    use super::*;
+
+    #[test]
+    fn context_mode_rejects_uri_and_read_content() {
+        for (uri, read_content, conflicting_flag) in [
+            ("viking://resources", false, "--uri"),
+            ("", true, "--read-content"),
+            ("viking://resources", true, "--uri"),
+        ] {
+            let error = validate_search_mode_options("context", uri, read_content)
+                .expect_err("context options should be rejected before sending a request");
+
+            assert!(matches!(error, Error::Client(_)));
+            assert!(error.to_string().contains(conflicting_flag));
+            assert!(error.to_string().contains("--mode context"));
+            assert!(error.to_string().contains("--mode list"));
+        }
+    }
+
+    #[test]
+    fn valid_search_mode_combinations_remain_supported() {
+        assert!(validate_search_mode_options("context", "", false).is_ok());
+        for (uri, read_content) in [
+            ("", false),
+            ("viking://resources", false),
+            ("", true),
+            ("viking://resources", true),
+        ] {
+            assert!(validate_search_mode_options("list", uri, read_content).is_ok());
+        }
     }
 }
 

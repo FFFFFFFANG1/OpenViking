@@ -786,6 +786,7 @@ impl HttpClient {
         uri: String,
         image: Option<String>,
         search_type: String,
+        mode: String,
         session_id: Option<String>,
         node_limit: i32,
         threshold: Option<f64>,
@@ -803,6 +804,8 @@ impl HttpClient {
             "query": query,
             "image_url": image_url,
             "search_type": search_type,
+            // Preserve the legacy request shape for servers without context mode.
+            "mode": (mode != "list").then_some(mode),
             "target_uri": uri,
             "session_id": session_id,
             "limit": node_limit,
@@ -2401,6 +2404,54 @@ mod tests {
         assert!(!default_request.contains("&limit="));
         assert!(!default_request.contains("sort_by="));
         assert!(!default_request.contains("sort_order="));
+    }
+
+    #[tokio::test]
+    async fn search_modes_preserve_list_requests_and_forward_context_options() {
+        for mode in ["list", "context"] {
+            let (base_url, request_rx) = spawn_request_capture_server().await;
+            let client = HttpClient::new(base_url, None, None, None, None, 5.0, false, None);
+
+            client
+                .search(
+                    "auth decision".to_string(),
+                    String::new(),
+                    None,
+                    "semantic".to_string(),
+                    mode.to_string(),
+                    Some("session-1".to_string()),
+                    3,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(vec!["memory".to_string()]),
+                    Some(vec!["project=openviking".to_string()]),
+                    false,
+                    Some("7d".to_string()),
+                )
+                .await
+                .expect("search request should succeed");
+
+            let request = request_rx.await.expect("request should be captured");
+            assert!(request.starts_with("POST /api/v1/search/search "));
+            let (_, body) = request.split_once("\r\n\r\n").expect("request body");
+            let actual: serde_json::Value = serde_json::from_str(body).expect("JSON body");
+            let mut expected = json!({
+                "query": "auth decision",
+                "target_uri": "",
+                "session_id": "session-1",
+                "limit": 3,
+                "context_type": ["memory"],
+                "tags": ["project=openviking"],
+                "events_time_decay_protection": "7d"
+            });
+            if mode == "context" {
+                expected["mode"] = json!("context");
+            }
+            assert_eq!(actual, expected, "unexpected {mode} request");
+        }
     }
 
     #[tokio::test]

@@ -525,10 +525,16 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
     CommandHelpSpec {
         path: &["search"],
         purpose: "Run experimental context-aware retrieval, optionally scoped to a session.",
-        examples: &[HelpItem {
-            label: "ov search \"what changed last time?\" --session-id abc123",
-            description: "Search with session context.",
-        }],
+        examples: &[
+            HelpItem {
+                label: "ov search \"what changed last time?\" --session-id abc123",
+                description: "Search with session context.",
+            },
+            HelpItem {
+                label: "ov search \"recent decisions\" --mode context",
+                description: "Assemble context ready to inject into a model.",
+            },
+        ],
         next_steps: &[HelpItem {
             label: "ov session get-session-context <id>",
             description: "Inspect the session context directly.",
@@ -2949,6 +2955,8 @@ mod tests {
         assert!(find_help.contains("Maximum final results returned"));
         assert!(search_help.contains("Maximum results per search pass."));
         assert!(search_help.contains("Search may merge multiple passes"));
+        assert!(search_help.contains("--mode <list|context>"));
+        assert!(search_help.contains("ignored in context mode"));
     }
 
     #[test]
