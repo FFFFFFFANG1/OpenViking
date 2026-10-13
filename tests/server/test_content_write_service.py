@@ -15,6 +15,9 @@ from openviking.session.memory.utils.content_visibility import visible_content
 from openviking.storage.acl import AclMode
 from openviking.storage.content_write import ContentWriteCoordinator
 from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
+from openviking.telemetry.context import bind_telemetry
+from openviking.telemetry.operation import OperationTelemetry
+from openviking.telemetry.request_wait_tracker import RequestWaitTracker
 from openviking_cli.exceptions import (
     AlreadyExistsError,
     DeadlineExceededError,
@@ -529,6 +532,7 @@ class _FakePathLock:
         self.acquire_error = acquire_error
         self.release_calls = []
         self.handoff_calls = []
+        self.batch_paths = []
 
     async def pathlock_acquire_exact(self, lock_path):
         del lock_path
@@ -538,11 +542,23 @@ class _FakePathLock:
             raise LockAcquisitionError("lock conflict")
         return self._lease
 
+    async def pathlock_acquire_exact_batch(self, lock_paths):
+        if self.acquire_error is not None:
+            raise self.acquire_error
+        if not self.acquire_result:
+            raise LockAcquisitionError("lock conflict")
+        self.batch_paths = list(lock_paths)
+        return self._lease
+
     async def pathlock_release(self, lease):
         self.release_calls.append(lease.id)
 
     async def pathlock_to_handoff(self, lease):
-        return {"owner_id": lease.id, "covered_paths": [{"path": "/fake/file", "kind": "exact"}]}
+        paths = self.batch_paths or ["/fake/file"]
+        return {
+            "owner_id": lease.id,
+            "covered_paths": [{"path": path, "kind": "exact"} for path in paths],
+        }
 
     async def pathlock_handoff(self, lease):
         self.handoff_calls.append(lease.id)
@@ -696,6 +712,110 @@ async def test_write_timeout_after_enqueue_keeps_resource_lock_handed_off(monkey
     assert viking_fs._async_agfs.handoff_calls == ["lock-1"]
     assert viking_fs.delete_temp_calls == []
     assert viking_fs.content[file_uri] == "updated"
+
+
+@pytest.mark.asyncio
+async def test_batch_write_hands_exact_batch_lock_to_request_coordinator(monkeypatch):
+    root_uri = "viking://resources/demo"
+    first_uri = f"{root_uri}/first.md"
+    second_uri = f"{root_uri}/second.md"
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
+    telemetry = OperationTelemetry(operation="content.batch_write", enabled=False)
+    tracker = RequestWaitTracker()
+    queue = _FakeSemanticQueue()
+    viking_fs = _FakeVikingFS(file_uri=first_uri, root_uri=root_uri)
+    viking_fs.content[second_uri] = "second-original"
+    coordinator = ContentWriteCoordinator(viking_fs=viking_fs)
+
+    monkeypatch.setattr(
+        "openviking.storage.content_write.get_queue_manager",
+        lambda: _FakeQueueManager(queue),
+    )
+    monkeypatch.setattr(
+        "openviking.storage.content_write.get_request_wait_tracker",
+        lambda: tracker,
+    )
+    monkeypatch.setattr(coordinator, "_load_file_abstracts", AsyncMock(return_value={}))
+    monkeypatch.setattr(coordinator, "_refresh_batch", AsyncMock(return_value=None))
+
+    with bind_telemetry(telemetry):
+        result = await coordinator.batch_write(
+            root_uri=root_uri,
+            operations=[
+                {"uri": first_uri, "content": "first-updated", "mode": "replace"},
+                {"uri": second_uri, "content": "second-updated", "mode": "replace"},
+            ],
+            ctx=ctx,
+            wait=False,
+        )
+
+    expected_paths = [
+        viking_fs._uri_to_path(first_uri, ctx=ctx),
+        viking_fs._uri_to_path(second_uri, ctx=ctx),
+    ]
+    assert result["updated"] == [first_uri, second_uri]
+    assert viking_fs._async_agfs.batch_paths == expected_paths
+    assert viking_fs._async_agfs.release_calls == []
+    assert viking_fs._async_agfs.handoff_calls == ["lock-1"]
+    assert len(queue.messages) == 1
+    coordinator_msg = queue.messages[0]
+    assert coordinator_msg.wait_for_request_completion is True
+    assert coordinator_msg.skip_vectorization is True
+    assert coordinator_msg.lock_handoff["covered_paths"] == [
+        {"path": path, "kind": "exact"} for path in expected_paths
+    ]
+    assert tracker.has_request(telemetry.telemetry_id) is True
+
+    tracker.mark_semantic_done(telemetry.telemetry_id, coordinator_msg.id)
+    assert tracker.has_request(telemetry.telemetry_id) is False
+
+
+@pytest.mark.asyncio
+async def test_batch_write_blocks_recursive_delete_until_coordinator_releases(service, monkeypatch):
+    ctx = RequestContext(user=service.user, role=Role.USER)
+    root_uri = "viking://resources/batch-lock"
+    first_uri = f"{root_uri}/first.md"
+    second_uri = f"{root_uri}/second.md"
+    telemetry = OperationTelemetry(operation="content.batch_write", enabled=False)
+    tracker = RequestWaitTracker()
+    queue = _FakeSemanticQueue()
+    coordinator = ContentWriteCoordinator(viking_fs=service.viking_fs)
+
+    await service.viking_fs.mkdir(root_uri, exist_ok=True, ctx=ctx)
+    await service.viking_fs.write_file(first_uri, "first-original", ctx=ctx)
+    await service.viking_fs.write_file(second_uri, "second-original", ctx=ctx)
+    monkeypatch.setattr(
+        "openviking.storage.content_write.get_queue_manager",
+        lambda: _FakeQueueManager(queue),
+    )
+    monkeypatch.setattr(
+        "openviking.storage.content_write.get_request_wait_tracker",
+        lambda: tracker,
+    )
+    monkeypatch.setattr(coordinator, "_load_file_abstracts", AsyncMock(return_value={}))
+    monkeypatch.setattr(coordinator, "_refresh_batch", AsyncMock(return_value=None))
+
+    with bind_telemetry(telemetry):
+        await coordinator.batch_write(
+            root_uri=root_uri,
+            operations=[
+                {"uri": first_uri, "content": "first-updated", "mode": "replace"},
+                {"uri": second_uri, "content": "second-updated", "mode": "replace"},
+            ],
+            ctx=ctx,
+            wait=False,
+        )
+
+    with pytest.raises(ResourceBusyError):
+        await service.fs.rm(root_uri, ctx=ctx, recursive=True)
+
+    coordinator_msg = queue.messages[0]
+    lease = await service.viking_fs._async_agfs.pathlock_adopt(coordinator_msg.lock_handoff)
+    await service.viking_fs._async_agfs.pathlock_release(lease)
+    tracker.mark_semantic_done(telemetry.telemetry_id, coordinator_msg.id)
+
+    await service.fs.rm(root_uri, ctx=ctx, recursive=True)
+    assert await service.viking_fs.exists(root_uri, ctx=ctx) is False
 
 
 @pytest.mark.asyncio
