@@ -8,7 +8,7 @@
 
 **有必要吸收 OpenSpace 的部分设计。收益最大的是维护流程的组织方式，尤其是带证据的改动提案、暂存后验证、可恢复的提交，以及按版本记录效果。** 这些正好对应原文档的关键缺口，而且可以放在 OV 外围实现。
 
-保留 OV 作为 Skill 包、引用文件、会话及快照的存储系统，在 `main` 的 Session Skill 候选进入内部 trainer 前新增一个窄的 `SkillMaintenanceSink`，并实现独立的 `skill-evolution-service`。外部服务借鉴 OpenSpace 的数据契约和分阶段流程，通过 OV 公共 API 读写正式包；一个 Agent Harness 适配器负责采集实际加载版本和决策边界刷新。完整引入 OpenSpace runtime 会带来另一套 Skill registry、SQLite 存储、工具运行时和身份映射，接入成本与本场景收益不匹配。
+保留 OV 作为 Skill 包、引用文件、会话及快照的存储系统，在 `main` 的 Session Skill 候选进入内部 trainer 前新增一个窄的 `SkillMaintenanceSink`，并实现独立的 `skill-evolution-service`。第一版按 [Rollout、Reconcile、Publish/Sync 三模块](ov-skill-evolution-detour.md#三个模块的契约)组织：外围服务借鉴 OpenSpace 的证据契约、暂存编辑与验证，由单发布者通过 OV 公共 API 写正式包；一个 Agent Harness 适配器负责采集实际加载版本和决策边界刷新。完整引入 OpenSpace runtime 会带来另一套 Skill registry、SQLite 存储、工具运行时和身份映射，接入成本与本场景收益不匹配。
 
 **语义去重和运行中同步仍需自行设计。** OpenSpace 的本地去重主要是候选键合并与名称/描述相似检查，发布后刷新的是本地 registry。它们不足以完成原文档要求的跨 Agent 语义去重、任务库原子发布和版本采用确认。
 
@@ -92,7 +92,7 @@ OpenSpace 的 [`EvolutionCandidateStore`](https://github.com/HKUDS/OpenSpace/blo
 
 [`EvolutionCommitter._refresh_registry()`](https://github.com/HKUDS/OpenSpace/blob/38277815ed44a53d757973c2bc4454c3b6426698/openspace/skill_engine/evolution/engine.py) 只更新持有的本地 registry。[动态路径触发](https://github.com/HKUDS/OpenSpace/blob/38277815ed44a53d757973c2bc4454c3b6426698/openspace/skill_engine/protocol.py)能在访问文件时发现相关 Skill，但不能替代任务阶段必读检查。
 
-云端客户端有包 snapshot、内容哈希和本地 `clean/dirty/conflict` [映射状态](https://github.com/HKUDS/OpenSpace/blob/38277815ed44a53d757973c2bc4454c3b6426698/openspace/cloud/local_mapping.py)，可借鉴缓存失效思想；本次读取的代码不能证明它保证所有远程 Agent 已采用新版本。我们仍需原设计的 `library_revision`、按阶段刷新、采用回执及旧版本处理。OpenSpace 的证据 `manifest_watermark` 是证据采集水位，云端分类树的 `snapshot_version` 也不是我们的任务 Skill 库发布版本，三者不可混用。
+云端客户端有包 snapshot、内容哈希和本地 `clean/dirty/conflict` [映射状态](https://github.com/HKUDS/OpenSpace/blob/38277815ed44a53d757973c2bc4454c3b6426698/openspace/cloud/local_mapping.py)，可借鉴缓存失效思想；本次读取的代码不能证明它保证所有远程 Agent 已采用新版本。我们仍需原设计的 `lib_version`、按阶段刷新、采用回执及旧版本处理。OpenSpace 的证据 `manifest_watermark` 是证据采集水位，云端分类树的 `snapshot_version` 也不是我们的任务 Skill 库发布版本，三者不可混用。
 
 ### OpenSpace 的实际 Skill 加载路径
 
@@ -124,10 +124,12 @@ flowchart TB
 | `Deduplicator.resolve(proposal, latest_library)` | 与已发布包及待处理候选比较 → 更新/合并/新建/无需改动 | OV 语义召回、正文和附件读取；候选区自行索引/比较 |
 | `AuthoringBackend.stage(proposal, packages)` | 可审查的完整候选包及 diff | 下载 OV 包；模型编辑本地暂存目录。Compile 可选，但必须输出到隔离的候选位置 |
 | `Evaluator.evaluate(baseline, candidate, cases)` | 格式、引用、触发和任务效果 → 可发布判定 | `skills/validate` 只做基础结构检查，其余由插件实现 |
-| `Publisher.publish(proposal_id, expected_revisions, bundle)` | 一次 release 变更一个包；输出发布结果、新包 revision、library_revision、快照和动作状态 | Skill 增改删、等待任务、完整性读取、snapshot、content/write |
+| `Publisher.publish(proposal_id, expected_revisions, bundle)` | 一次 release 变更一个包；输出发布结果、新包 revision、lib_version、快照和动作状态 | Skill 增改删、等待任务、完整性读取、snapshot、content/write |
 | `HarnessAdapter.refresh(boundary)` | 拉取清单、加载必读内容、记录采用版本 | content/read、get_skill、find_skills、附件下载 |
 
 `expected_revisions` 是我们发布器的参数，**OV 当前整包更新接口并不接受它**。单写入服务应在持有任务库写锁时复查包 revision，并把所有发布操作纳入同一入口；若允许其他进程直接改这些包，仅靠“先读再写”仍有竞争窗口。
+
+提案入口统一为拟新增的 `SkillsetUpdate.submit`：Agent 必须提交修改理由与轨迹证据，人工直接改包可省略理由，但操作与实际 diff 仍要记录。人工纠正作为原文反馈事件保存，再由 Rollout/Reconcile 判断是否生成修订。发布清单以 `library_id + lib_version` 标识唯一正式库状态；清单仅指向包 revision 和最近 release，逐包 changed 标志、diff 引用、来源提案/轨迹/Agent 与提交时间写入不可变发布记录。相同基线的并发提案先做文件哈希、锚点和依赖检查，再按确定顺序组合验证；旧版本提案遇到已发布新版本时，若相关文件变化则重新定位或用维护 loop 融合并验证，不能直接按到达顺序覆盖。
 
 服务状态库可以先用 SQLite，只部署一个发布者；OV 继续保存正式包和原始证据。不直接 import `openviking/session/train` 或 OpenSpace 的本地 SkillStore。需要多个服务实例时再升级作业租约/存储并发协议，这样不会把第一版变成两个存储系统间的全面同步项目。
 
@@ -137,6 +139,7 @@ flowchart TB
 - `run_id`：某次具体任务执行；同一任务的多个 Agent 另有 `agent_id`。
 - `logical_skill_id`：跨修订保持稳定的业务身份；内容版本用 OV `root_uri + revision` 绑定。
 - `proposal_id` / `release_id`：提案幂等与发布恢复的身份。
+- `lib_version`：`library_id` 范围内递增的已发布库版本；提案携带 `base_lib_version`，不能把提案编号当作发布版本。
 
 OpenSpace 的候选出现次数按不同 task ID 累积。接入时若把所有工作 Agent 的业务任务类型都当作同一个 task ID，独立验证次数会失真；同一次执行的多个 Agent 也不应自动算成多个独立成功样本。
 
@@ -152,6 +155,8 @@ OpenSpace 的候选出现次数按不同 task ID 累积。接入时若把所有�
 前三步共同构成第一版，不能只交付证据适配或 Experience 补充。原先“OV 核心可零改动”的估计已不适用于选定的 detour，因此不沿用原先的 2–4 人周粗估；工程量需要按 OV 候选出口、Harness、worker、任务验收和发布恢复分别拆单。
 
 第一版采用“串行原地更新 + 版本不匹配时暂停加载并重试”，在决策边界核对清单与实包 revision。若包写入成功但清单推进失败，由发布日志恢复，不把半完成发布标为成功。若必须保证旧任务持续读取旧版、并且一组包完全同步切换，则需不可变发布包或按快照读取的适配器，最后原子切换清单指针；这会额外增加版本存储、名称/路径映射和清理成本，不能只靠通知解决。
+
+首期四份适用的 `SKILL.md` 可在 token 预算内由 Harness 放入可替换的活动上下文块，references 按需加载。Publish/Sync 拟在 OV 响应上携带短版本通知（新 `lib_version`、变化包和摘要，整个通知小于 1000 token）；只有再次调用 OV 的 Agent 会收到，Harness 仍要在下一决策前刷新正文并回报采用版本。OV 服务端通知与 Harness 上报/替换都是待实现协议，VikingBot 现有 post-call hook 属于 Bot 层，不能直接当作全体 Agent 的广播。
 
 第一版需要的 OV 核心小改动就是候选出口：把提取与内部写入解耦、每次合格归档送一次证据，并提供可靠的提案回执。允许多个直接写入者时，为整包 `PUT` 加 `expected_revision` 条件检查；需要消除同名根回退风险时，为管理 API 加严格目标选择，属于后续可选增强。内部 Skill trainer 的 loader/search 缺口仅在将来改回 direct 写入路径时才成为前置修复。
 

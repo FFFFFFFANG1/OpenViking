@@ -95,6 +95,10 @@ flowchart TD
 
 第一版直接交付“归档证据 → SkillProposal → 整包编写与验证 → OV 共享库发布 → Agent 采用”闭环。OV Skill 梯度只是提案提示，Experience 可作为独立的运行时记忆，但不是 Skill 更新的输入前提；新建、修改、明确授权的删除及 references 更新都由包级提案明确执行。
 
+按 [`main` detour 的三模块契约](ov-skill-evolution-detour.md#三个模块的契约)，Rollout 负责从轨迹形成带基线版本的局部 patch 提案，Reconcile 负责跨 Agent 合并并在隔离包应用/验证，Publish/Sync 才写唯一正式库并驱动 Agent 拉取。它与 `train_opt` 的“梯度 → plan → apply”形状相似；区别是当前 `PatchSemanticGradient` 主要表达单个 memory file 的 before/after，`SkillPolicyUpdater.apply()` 会直接走 Skill 写入，而第一版需要多文件包 patch、独立暂存和发布门控。局部 patch 可以为空，避免把 OV 没抽出梯度误判成没有 Skill 问题。
+
+这里的发布身份统一为 `library_id + lib_version`，`task_id/run_id` 只关联任务轨迹。提案带 `base_lib_version`、目标文件哈希和锚点；首期先用确定性的失配检查处理同基线提案，目标位置变化时才交维护 loop 在最新包上重新合成并验证。`train_opt` 的批量 plan/重载可作参考，但不能直接给出每条提案在合成后仍被满足的保证。发布记录另以 `release_id` 索引逐包 changed、diff、来源提案/轨迹/Agent 和提交时间；清单只保留发布状态与该记录的指针。
+
 ### 接口边界和接入成本
 
 | 接入点 | 使用什么 | 性质与成本 |
@@ -107,6 +111,8 @@ flowchart TD
 | 共享和同步 | 外围 task library manifest、release log、Harness revision 检查/回执 | 两边都未完整满足；一个 Harness 中，多 Harness/多机更高 |
 
 `Session.commit` 的普通会话提取不应被描述成默认自动运行完整 benchmark 训练/评估流水线。`SkillMaintenanceSink` 是第一版拟新增的内部出口，不是现有公共 API；正式包仍通过 OV 公共 Skill API 发布。
+
+Agent 侧首期可由 Harness 把四份适用的 `SKILL.md` 放进带版本的可替换上下文块，reference 按需读取。拟新增的 OV 响应通知控制在 1000 token 内，只提示新库版本、变化包和短摘要；仅在下一次 OV 调用返回时可见。真正替换旧上下文并确认采用仍由 Harness 完成，现有 VikingBot post-call hook 不能自动提供跨 Agent 的采用保证。
 
 ## OpenSpace 借鉴优先级修订
 
