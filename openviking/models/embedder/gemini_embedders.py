@@ -139,12 +139,7 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
         self._client_kwargs: Dict[str, Any] = {"api_key": api_key}
         if _HTTP_RETRY_AVAILABLE:
             self._client_kwargs["http_options"] = HttpOptions(
-                retry_options=HttpRetryOptions(
-                    attempts=max(self.max_retries + 1, 1),
-                    initial_delay=0.5,
-                    max_delay=8.0,
-                    exp_base=2.0,
-                )
+                retry_options=HttpRetryOptions(attempts=1)
             )
         self.client = genai.Client(**self._client_kwargs)
         self.task_type = task_type
@@ -213,14 +208,10 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
             return EmbedResult(dense_vector=vector)
 
         try:
-            result = (
-                _call()
-                if _HTTP_RETRY_AVAILABLE
-                else self._run_with_retry(
-                    _call,
-                    logger=logger,
-                    operation_name="Gemini embedding",
-                )
+            result = self._run_once(
+                _call,
+                logger=logger,
+                operation_name="Gemini embedding",
             )
             # Estimate token usage
             estimated_tokens = self._estimate_tokens(text)
@@ -262,7 +253,7 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
             return EmbedResult(dense_vector=vector)
 
         try:
-            result = await self._run_with_async_retry(
+            result = await self._run_once_async(
                 _call,
                 logger=logger,
                 operation_name="Gemini async embedding",
